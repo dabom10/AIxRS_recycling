@@ -1,0 +1,17 @@
+string request_id
+string target_bin
+string object_pose_frame
+float64 x
+float64 y
+float64 z
+float64 qx
+float64 qy
+float64 qz
+float64 qw
+string grasp_profile
+---
+bool success
+string message
+---
+float32 progress
+string stage
