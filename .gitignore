@@ -26,3 +26,8 @@ Thumbs.db
 # ===== ROS2 Package Setup =====
 setup.cfg
 setup.py
+
+#==== all test image ======
+*.png
+*.jpg
+*.zip
