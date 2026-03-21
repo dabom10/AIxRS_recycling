@@ -5,20 +5,31 @@ import types
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
 import cv2
-import yolov5
+from ultralytics import YOLO
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Bool, Float32
 
 # ── grasp_detection_node 경로 설정 ───────────────────────────────────────────
-_GRASP_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../CV/grasp_detection/grasp_detection")
-)
-if not os.path.isdir(_GRASP_DIR):
-    _GRASP_DIR = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../../../../../../src/AIxRS_recycling/CV/grasp_detection/grasp_detection")
+# __file__ 위치에서 위로 올라가며 CV/grasp_detection/grasp_detection 을 탐색
+def _find_grasp_dir():
+    target = os.path.join("CV", "grasp_detection", "grasp_detection")
+    current = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(10):
+        candidate = os.path.join(current, target)
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    raise RuntimeError(
+        f"grasp_detection 디렉터리를 찾을 수 없습니다. "
+        f"CV/grasp_detection/grasp_detection 경로가 워크스페이스 내에 있는지 확인하세요."
     )
+
+_GRASP_DIR = _find_grasp_dir()
 
 _MODEL_DIR = os.path.abspath(os.path.join(_GRASP_DIR, "../../models"))
 
@@ -68,7 +79,7 @@ class RecycleDetect(Node):
         # 모델 로드
         model_path = os.path.join(_MODEL_DIR, YOLO_SEG.model_path)
         self.get_logger().info(f"모델 로딩 중: {model_path}")
-        self.model = yolov5.load(model_path)
+        self.model = YOLO(model_path)
         self.model.conf = YOLO_SEG.conf
         self.model.iou = YOLO_SEG.iou
         self.model.agnostic = YOLO_SEG.agnostic
