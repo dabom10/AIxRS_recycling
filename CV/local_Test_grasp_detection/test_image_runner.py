@@ -1,18 +1,17 @@
-import os
-os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-
 import json
-import math
+import os
 from pathlib import Path
 
 import cv2
-import yolov5
+import numpy as np
+from ultralytics import YOLO
 
-from config import ROI, SELECT, YOLO_SEG
+from config import ROI, YOLO_SEG, PATH
 
 
 def make_roi(image, x1_ratio, y1_ratio, x2_ratio, y2_ratio):
     h, w = image.shape[:2]
+
     x1 = int(w * x1_ratio)
     y1 = int(h * y1_ratio)
     x2 = int(w * x2_ratio)
@@ -22,6 +21,7 @@ def make_roi(image, x1_ratio, y1_ratio, x2_ratio, y2_ratio):
     y1 = max(0, min(y1, h - 2))
     x2 = max(x1 + 1, min(x2, w - 1))
     y2 = max(y1 + 1, min(y2, h - 1))
+
     return x1, y1, x2, y2
 
 
@@ -30,26 +30,11 @@ def crop_roi(img, roi):
     return img[y1:y2, x1:x2].copy()
 
 
-def detect_yolo_boxes_from_path(model, image_path, imgsz=416):
-    """
-    첫 번째 단독 테스트 코드와 최대한 동일하게:
-    저장된 ROI 이미지 파일 경로를 model에 넣어서 추론
-    """
-    results = model(image_path, size=imgsz)
-    predictions = results.pred[0]
-
-    out = []
-    if predictions is None or len(predictions) == 0:
-        return out
-
-    for pred in predictions:
-        x1, y1, x2, y2, conf, cls = pred.tolist()
-        out.append({
-            "bbox": [int(x1), int(y1), int(x2), int(y2)],
-            "conf": float(conf),
-            "cls": int(cls),
-        })
-    return out
+def save_roi_preview(img, roi, save_path):
+    vis = img.copy()
+    x1, y1, x2, y2 = roi
+    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 3)
+    cv2.imwrite(save_path, vis)
 
 
 def get_class_name(model, cls_id):
@@ -61,290 +46,228 @@ def get_class_name(model, cls_id):
     return str(cls_id)
 
 
-def draw_all_candidates_on_roi(roi_img, candidates, model, save_path):
-    """
-    ROI 기준 전체 검출 결과를 먼저 저장
-    """
-    vis = roi_img.copy()
+def run_yolov8_seg(model, image):
+    results = model.predict(
+        source=image,
+        conf=YOLO_SEG.conf,
+        iou=YOLO_SEG.iou,
+        agnostic_nms=YOLO_SEG.agnostic_nms,
+        max_det=YOLO_SEG.max_det,
+        save=YOLO_SEG.save,
+        verbose=YOLO_SEG.verbose,
+    )
+    return results[0]
 
-    for item in candidates:
-        x1, y1, x2, y2 = item["bbox"]
-        conf = item["conf"]
-        cls_id = item["cls"]
+
+def extract_candidates_full_coords(model, result, roi):
+    x1r, y1r, _, _ = roi
+
+    boxes = result.boxes
+    masks = result.masks
+
+    candidates = []
+
+    if boxes is None or len(boxes) == 0:
+        return candidates
+
+    mask_polygons = None
+    if masks is not None and masks.xy is not None:
+        mask_polygons = masks.xy
+
+    roi_h = roi[3] - roi[1]
+    roi_w = roi[2] - roi[0]
+    target_cx_roi = roi_w / 2.0
+    target_cy_roi = roi_h / 2.0
+
+    print(f"검출 개수: {len(boxes)}")
+
+    for i in range(len(boxes)):
+        x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
+        conf = float(boxes.conf[i].item())
+        cls_id = int(boxes.cls[i].item())
         class_name = get_class_name(model, cls_id)
-        label = f"{class_name} {conf:.2f}"
 
+        bw = max(1, int(x2) - int(x1))
+        bh = max(1, int(y2) - int(y1))
+        area = bw * bh
+
+        # 기본 중심은 bbox 중심 (ROI 기준)
+        center_x_roi = (int(x1) + int(x2)) / 2.0
+        center_y_roi = (int(y1) + int(y2)) / 2.0
+
+        # mask polygon이 있으면 중심만 polygon 평균으로 보정
+        if mask_polygons is not None and i < len(mask_polygons):
+            poly = mask_polygons[i]
+            if poly is not None and len(poly) > 0:
+                center_x_roi = float(np.mean(poly[:, 0]))
+                center_y_roi = float(np.mean(poly[:, 1]))
+
+        dist2 = float((center_x_roi - target_cx_roi) ** 2 + (center_y_roi - target_cy_roi) ** 2)
+
+        # 원본 전체 이미지 기준으로 변환
+        x1_full = int(x1 + x1r)
+        y1_full = int(y1 + y1r)
+        x2_full = int(x2 + x1r)
+        y2_full = int(y2 + y1r)
+
+        center_x_full = float(center_x_roi + x1r)
+        center_y_full = float(center_y_roi + y1r)
+
+        candidates.append({
+            "idx": int(i),
+            "bbox_xyxy": [x1_full, y1_full, x2_full, y2_full],
+            "conf": float(conf),
+            "cls_id": int(cls_id),
+            "class_name": str(class_name),
+            "area": int(area),
+            "center": [center_x_full, center_y_full],
+            "dist2": float(dist2),
+        })
+
+        print(
+            f"[{i}] class={class_name}, conf={conf:.4f}, "
+            f"bbox_full={[x1_full, y1_full, x2_full, y2_full]}, "
+            f"area={area}, center_full=({center_x_full:.1f}, {center_y_full:.1f}), dist2={dist2:.1f}"
+        )
+
+    return candidates
+
+
+def draw_bboxes_on_full_image(img, detections, roi):
+    vis = img.copy()
+
+    # ROI도 참고용으로 표시
+    rx1, ry1, rx2, ry2 = roi
+    cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (0, 255, 255), 2)
+    cv2.putText(
+        vis,
+        "ROI",
+        (rx1, max(ry1 - 10, 20)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 255),
+        2
+    )
+
+    # ROI 중심도 원본 기준으로 표시
+    target_cx = int((rx1 + rx2) / 2)
+    target_cy = int((ry1 + ry2) / 2)
+    cv2.circle(vis, (target_cx, target_cy), 6, (255, 0, 0), -1)
+    cv2.putText(
+        vis,
+        "target",
+        (target_cx + 8, target_cy - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 0, 0),
+        2
+    )
+
+    for det in detections:
+        x1, y1, x2, y2 = det["bbox_xyxy"]
+        cx, cy = det["center"]
+        class_name = det["class_name"]
+        conf = det["conf"]
+        area = det["area"]
+
+        # bbox
         cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        # 중심점
+        cv2.circle(vis, (int(cx), int(cy)), 5, (0, 0, 255), -1)
+
+        label = f"{class_name} {conf:.2f} A:{area}"
         cv2.putText(
             vis,
             label,
             (x1, max(y1 - 10, 20)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
+            0.55,
+            (255, 255, 255),
             2
         )
 
-    cv2.imwrite(save_path, vis)
-
-
-def pick_best_detection(candidates, cfg, roi_shape):
-    if not candidates:
-        return None
-
-    h, w = roi_shape[:2]
-    cx0 = w / 2.0
-    cy0 = h * 0.78
-    diag = math.hypot(w, h)
-
-    best = None
-    best_score = -1e18
-
-    for item in candidates:
-        x1, y1, x2, y2 = item["bbox"]
-        conf = item["conf"]
-
-        bw = max(1, x2 - x1)
-        bh = max(1, y2 - y1)
-        area = bw * bh
-
-        cx = (x1 + x2) / 2.0
-        cy = (y1 + y2) / 2.0
-
-        if cy < h * cfg.min_cy_ratio:
-            continue
-
-        dist = math.hypot(cx - cx0, cy - cy0) / max(diag, 1e-6)
-        bottom_bias = cy / float(h)
-
-        score = (
-            cfg.center_weight * (1.0 - dist)
-            + cfg.area_weight * (area / float(w * h))
-            + cfg.bottom_bonus * bottom_bias
-            + 0.8 * conf
-        )
-
-        margin = 5
-        if x1 <= margin or y1 <= margin or x2 >= (w - margin) or y2 >= (h - margin):
-            score -= cfg.edge_penalty
-
-        if score > best_score:
-            best_score = score
-            best = item
-
-    if best is None:
-        best = max(candidates, key=lambda x: x["conf"])
-
-    return best
-
-
-def bbox_geometry(bbox):
-    x1, y1, x2, y2 = bbox
-    bw = max(1, x2 - x1)
-    bh = max(1, y2 - y1)
-
-    cx = (x1 + x2) / 2.0
-    cy = (y1 + y2) / 2.0
-
-    if bh >= bw:
-        major_axis_angle_deg = 90.0
-        grasp_angle_deg = 0.0
-        grasp_line_xyxy = [
-            float(x1), float(cy),
-            float(x2), float(cy),
-        ]
-        grasp_width_px = float(bw)
-    else:
-        major_axis_angle_deg = 0.0
-        grasp_angle_deg = 90.0
-        grasp_line_xyxy = [
-            float(cx), float(y1),
-            float(cx), float(y2),
-        ]
-        grasp_width_px = float(bh)
-
-    return {
-        "centroid": (cx, cy),
-        "object_width_px": float(bw),
-        "object_height_px": float(bh),
-        "major_axis_angle_deg": float(major_axis_angle_deg),
-        "grasp_angle_deg": float(grasp_angle_deg),
-        "grasp_line_xyxy": grasp_line_xyxy,
-        "grasp_width_px": float(grasp_width_px),
-    }
-
-
-def draw_debug(color, roi, yolo_bbox, centroid, label_text, major_angle, grasp_angle, grasp_line, save_path):
-    vis = color.copy()
-    x1r, y1r, x2r, y2r = roi
-
-    cv2.rectangle(vis, (x1r, y1r), (x2r, y2r), (100, 100, 100), 2)
-
-    x1, y1, x2, y2 = yolo_bbox
-    x1 += x1r
-    y1 += y1r
-    x2 += x1r
-    y2 += y1r
-
-    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    cv2.putText(
-        vis,
-        label_text,
-        (x1, max(y1 - 10, 20)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 255, 0),
-        2
-    )
-
-    cx, cy = centroid
-    cx = int(round(cx + x1r))
-    cy = int(round(cy + y1r))
-    cv2.circle(vis, (cx, cy), 6, (0, 0, 255), -1)
-
-    gx1, gy1, gx2, gy2 = grasp_line
-    p1 = (int(round(gx1 + x1r)), int(round(gy1 + y1r)))
-    p2 = (int(round(gx2 + x1r)), int(round(gy2 + y1r)))
-    cv2.line(vis, p1, p2, (255, 0, 0), 3)
-
-    txt1 = f"major={major_angle:.1f}"
-    txt2 = f"grasp={grasp_angle:.1f}"
-
-    cv2.putText(vis, txt1, (x1r + 10, y1r + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    cv2.putText(vis, txt2, (x1r + 10, y1r + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-    cv2.imwrite(save_path, vis)
+    return vis
 
 
 def main():
-    image_path = "../testData/plastic1.png"
+    image_path = PATH.image_path
+    save_dir = PATH.save_dir
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    print("모델 로딩 시작")
+    model = YOLO(YOLO_SEG.model_path)
+    print("모델 로딩 완료")
+    print("class names:", model.names)
+
     img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"이미지를 읽을 수 없음: {image_path}")
+
     image_name = Path(image_path).stem
 
-    if img is None:
-        raise FileNotFoundError(f"{image_path} not found")
-
-    os.makedirs("results", exist_ok=True)
-
-    model = yolov5.load(YOLO_SEG.model_path)
-    model.conf = YOLO_SEG.conf
-    model.iou = 0.45
-    model.agnostic = False
-    model.multi_label = True
-    model.max_det = 1000
-
+    # 1) ROI 계산
     roi = make_roi(img, ROI.x1_ratio, ROI.y1_ratio, ROI.x2_ratio, ROI.y2_ratio)
+
+    # 2) ROI 미리보기 저장
+    roi_preview_path = os.path.join(save_dir, f"roi_preview_{image_name}.png")
+    save_roi_preview(img, roi, roi_preview_path)
+
+    # 3) ROI crop
     color_roi = crop_roi(img, roi)
 
-    # 핵심: ROI를 저장한 뒤, 그 파일 경로로 추론
-    roi_path = f"results/debug_roi_{image_name}.jpg"
-    cv2.imwrite(roi_path, color_roi)
+    # 4) crop된 ROI 참고용 저장
+    roi_crop_path = os.path.join(save_dir, f"debug_roi_{image_name}.png")
+    cv2.imwrite(roi_crop_path, color_roi)
 
-    candidates = detect_yolo_boxes_from_path(model=model, image_path=roi_path, imgsz=416)
+    # 5) ROI만 추론
+    print("추론 시작")
+    result = run_yolov8_seg(model, color_roi)
 
-    # 전체 후보 먼저 저장
-    all_det_path = f"results/debug_all_{image_name}.jpg"
-    draw_all_candidates_on_roi(color_roi, candidates, model, all_det_path)
-
-    if not candidates:
-        print(json.dumps({
+    boxes = result.boxes
+    if boxes is None or len(boxes) == 0:
+        output = {
             "ok": False,
             "reason": "no_detection",
-            "roi_path": roi_path,
-            "all_det_image": all_det_path,
-        }, ensure_ascii=False, indent=2))
+            "image": str(image_path),
+            "roi_xyxy": [
+                int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3]),
+            ],
+            "roi_preview_path": str(roi_preview_path),
+            "roi_crop_path": str(roi_crop_path),
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2))
         return
 
-    print("=== candidates ===")
-    for i, c in enumerate(candidates):
-        cls_name = get_class_name(model, c["cls"])
-        print(f"{i}: class={c['cls']} ({cls_name}), conf={c['conf']:.4f}, bbox={c['bbox']}")
+    # 6) detection 결과를 원본 전체 좌표계로 변환
+    detections = extract_candidates_full_coords(model, result, roi)
 
-    selected_item = pick_best_detection(candidates, SELECT, color_roi.shape)
-    if selected_item is None:
-        print(json.dumps({
-            "ok": False,
-            "reason": "no_selected_detection",
-            "roi_path": roi_path,
-            "all_det_image": all_det_path,
-            "all_detections": candidates,
-        }, ensure_ascii=False, indent=2))
-        return
+    # 7) 원본 이미지 위에 bbox만 시각화
+    full_debug_vis = draw_bboxes_on_full_image(img, detections, roi)
 
-    yolo_bbox = selected_item["bbox"]
-    geom = bbox_geometry(yolo_bbox)
-    centroid = geom["centroid"]
+    full_debug_path = os.path.join(save_dir, f"debug_full_{image_name}.png")
+    cv2.imwrite(full_debug_path, full_debug_vis)
+    print("전체 결과 저장:", full_debug_path)
 
-    class_name = get_class_name(model, selected_item["cls"])
-    label_text = f"{class_name} {selected_item['conf']:.2f}"
-
-    debug_path = f"results/debug_selected_{image_name}.jpg"
-
-    draw_debug(
-        color=img,
-        roi=roi,
-        yolo_bbox=yolo_bbox,
-        centroid=centroid,
-        label_text=label_text,
-        major_angle=geom["major_axis_angle_deg"],
-        grasp_angle=geom["grasp_angle_deg"],
-        grasp_line=geom["grasp_line_xyxy"],
-        save_path=debug_path,
-    )
-
-    cx, cy = centroid
-    x1r, y1r, _, _ = roi
-    gx1, gy1, gx2, gy2 = geom["grasp_line_xyxy"]
-
+    # 8) 출력도 원본 전체 기준으로만 줌
     output = {
         "ok": True,
-        "image": image_path,
-        "roi_saved_path": roi_path,
-        "all_det_image": all_det_path,
-        "selected_debug_image": debug_path,
-
+        "image": str(image_path),
         "roi_xyxy": [
             int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3]),
         ],
-
-        "yolo_bbox_xyxy": [
-            int(yolo_bbox[0] + x1r),
-            int(yolo_bbox[1] + y1r),
-            int(yolo_bbox[2] + x1r),
-            int(yolo_bbox[3] + y1r),
+        "roi_preview_path": str(roi_preview_path),
+        "roi_crop_path": str(roi_crop_path),
+        "full_debug_image": str(full_debug_path),
+        "target_center_full": [
+            float((roi[0] + roi[2]) / 2.0),
+            float((roi[1] + roi[3]) / 2.0),
         ],
-
-        "bbox_xyxy": [
-            int(yolo_bbox[0] + x1r),
-            int(yolo_bbox[1] + y1r),
-            int(yolo_bbox[2] + x1r),
-            int(yolo_bbox[3] + y1r),
-        ],
-
-        "centroid_uv": [
-            float(cx + x1r),
-            float(cy + y1r),
-        ],
-
-        "object_width_px": float(geom["object_width_px"]),
-        "object_height_px": float(geom["object_height_px"]),
-        "major_axis_angle_deg": float(geom["major_axis_angle_deg"]),
-        "grasp_angle_deg": float(geom["grasp_angle_deg"]),
-        "grasp_width_px": float(geom["grasp_width_px"]),
-
-        "grasp_line_xyxy": [
-            float(gx1 + x1r),
-            float(gy1 + y1r),
-            float(gx2 + x1r),
-            float(gy2 + y1r),
-        ],
-
-        "selected_conf": float(selected_item["conf"]),
-        "selected_class": int(selected_item["cls"]),
-        "selected_class_name": class_name,
-        "all_detections": candidates,
+        "detections": detections
     }
 
+    print("\n=== detections ===")
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 

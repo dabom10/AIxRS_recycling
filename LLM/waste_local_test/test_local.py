@@ -7,7 +7,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True, help="이미지 파일 경로")
     parser.add_argument("--audio", default=None, help="음성 파일 경로")
-    parser.add_argument("--question", default=None, help="텍스트 질문")
     parser.add_argument("--vision-hint", default=None, help="YOLO 등 비전 힌트")
     args = parser.parse_args()
 
@@ -15,7 +14,6 @@ def main() -> None:
     result = assistant.ask(
         image_path=args.image,
         audio_path=args.audio,
-        text_question=args.question,
         vision_hint=args.vision_hint,
     )
 

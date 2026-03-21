@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 
 model = YOLO("models/waste2.pt")
-image_name= "waste_grasp/debug_roi.jpg"
+image_name= "./testData/test10.png"
 img = cv2.imread(image_name)
 
 results = model(img, conf=0.01)

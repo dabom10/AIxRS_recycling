@@ -2,7 +2,7 @@
 <package format="3">
   <name>grasp_detection</name>
   <version>0.0.1</version>
-  <description>YOLOv5-based grasp detection ROS2 node</description>
+  <description>ROS 2 package for ROI-based grasp detection using YOLO segmentation.</description>
 
   <maintainer email="yesul0718@naver.com">kimyeseul</maintainer>
   <license>Apache-2.0</license>
@@ -13,10 +13,9 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>cv_bridge</depend>
-  <depend>launch</depend>
-  <depend>launch_ros</depend>
 
-  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
