@@ -1,6 +1,6 @@
 import os
 import sys
-import json
+import types
 
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
@@ -9,52 +9,87 @@ import yolov5
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Bool
+from std_msgs.msg import String, Bool, Float32
 
-# test_image_runner 경로 추가
-_CV_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../CV/local_Test_grasp_detection")
+# ── grasp_detection_node 경로 설정 ───────────────────────────────────────────
+_GRASP_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../CV/grasp_detection/grasp_detection")
 )
-sys.path.insert(0, _CV_DIR)
+if not os.path.isdir(_GRASP_DIR):
+    _GRASP_DIR = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../../../../../src/AIxRS_recycling/CV/grasp_detection/grasp_detection")
+    )
 
-from test_image_runner import (
-    make_roi,
-    crop_roi,
-    pick_best_detection,
-    bbox_geometry,
-    get_class_name,
-)
-from config import ROI, SELECT, YOLO_SEG
+_MODEL_DIR = os.path.abspath(os.path.join(_GRASP_DIR, "../../models"))
 
+# ── grasp_detection_node import 준비 ─────────────────────────────────────────
+# config를 직접 로드 후 AIxRS_recycling... 경로로 sys.modules에 등록
+sys.path.insert(0, _GRASP_DIR)
+import config as _gd_config
+
+for _mod_name in [
+    'AIxRS_recycling',
+    'AIxRS_recycling.CV',
+    'AIxRS_recycling.CV.grasp_detection',
+    'AIxRS_recycling.CV.grasp_detection.grasp_detection',
+]:
+    sys.modules.setdefault(_mod_name, types.ModuleType(_mod_name))
+
+sys.modules['AIxRS_recycling.CV.grasp_detection.grasp_detection.config'] = _gd_config
+
+# get_package_share_directory mock (grasp_detection 패키지 미설치 대응)
+from unittest.mock import patch
+with patch('ament_index_python.packages.get_package_share_directory', return_value=_MODEL_DIR):
+    import grasp_detection_node as _gdn
+
+# ── 함수 및 설정 참조 ─────────────────────────────────────────────────────────
+make_roi                    = _gdn.make_roi
+crop_roi                    = _gdn.crop_roi
+pick_best_detection         = _gdn.pick_best_detection
+bbox_geometry               = _gdn.bbox_geometry
+get_class_name              = _gdn.get_class_name
+detect_yolo_boxes_from_path = _gdn.detect_yolo_boxes_from_path
+
+ROI      = _gd_config.ROI
+SELECT   = _gd_config.SELECT
+YOLO_SEG = _gd_config.YOLO_SEG
 
 class RecycleDetect(Node):
     def __init__(self):
         super().__init__("recycle_detect")
 
         # 모델 로드
-        model_path = os.path.abspath(os.path.join(_CV_DIR, YOLO_SEG.model_path))
+        model_path = os.path.join(_MODEL_DIR, YOLO_SEG.model_path)
         self.get_logger().info(f"모델 로딩 중: {model_path}")
         self.model = yolov5.load(model_path)
         self.model.conf = YOLO_SEG.conf
-        self.model.iou = 0.45
-        self.model.agnostic = False
-        self.model.multi_label = True
-        self.model.max_det = 1000
+        self.model.iou = YOLO_SEG.iou
+        self.model.agnostic = YOLO_SEG.agnostic
+        self.model.multi_label = YOLO_SEG.multi_label
+        self.model.max_det = YOLO_SEG.max_det
         self.get_logger().info("모델 로딩 완료")
 
+        # 임시 ROI 저장 디렉터리
+        import tempfile
+        self._tmp_dir = tempfile.mkdtemp(prefix="recycle_detect_")
+        self._frame_idx = 0
+
         # 웹캠
-        self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(8)
         if not self.cap.isOpened():
             self.get_logger().error("웹캠을 열 수 없습니다.")
             raise RuntimeError("웹캠 오류")
 
         # 퍼블리셔
-        self.result_pub = self.create_publisher(Bool,   "/recycle1/grasp_result", 10)
-        self.class_pub  = self.create_publisher(String, "/recycle1/class_name", 10)
+        self.result_pub   = self.create_publisher(Bool,    "/recycle1/grasp_result", 10)
+        self.class_pub    = self.create_publisher(String,  "/recycle1/class_name",   10)
+        self.cx_pub       = self.create_publisher(Float32, "/recycle1/center_x",     10)
+        self.cy_pub       = self.create_publisher(Float32, "/recycle1/center_y",     10)
+        self.depth_pub    = self.create_publisher(Float32, "/recycle1/depth",        10)
 
         # 타이머 (30fps)
         self.timer = self.create_timer(1.0 / 30.0, self.timer_callback)
-        self.get_logger().info("RecycleDetect 시작 | 토픽: /recycle1/class_name")
+        self.get_logger().info("RecycleDetect 시작 | 토픽: class_name / center_x / center_y / depth")
 
     def timer_callback(self):
         ret, frame = self.cap.read()
@@ -62,18 +97,28 @@ class RecycleDetect(Node):
             self.get_logger().warn("프레임 읽기 실패")
             return
 
-        result, vis = self._process(frame)
+        self._frame_idx += 1
+        result, vis = self._process(frame, self._frame_idx)
 
         # 감지 성공 여부 퍼블리시
         msg = Bool()
         msg.data = bool(result.get("ok", False))
         self.result_pub.publish(msg)
 
-        # 객체명만 퍼블리시
+        # 객체명 퍼블리시
         class_msg = String()
         class_msg.data = result.get("class", "")
         if class_msg.data:
             self.class_pub.publish(class_msg)
+
+        # center_x, center_y, depth 퍼블리시
+        cx, cy = result.get("centroid_uv", [0.0, 0.0])
+        cx_msg = Float32(); cx_msg.data = float(cx)
+        cy_msg = Float32(); cy_msg.data = float(cy)
+        depth_msg = Float32(); depth_msg.data = result.get("depth", 0.0)
+        self.cx_pub.publish(cx_msg)
+        self.cy_pub.publish(cy_msg)
+        self.depth_pub.publish(depth_msg)
 
         # 화면 출력
         cv2.imshow("RecycleDetect", vis)
@@ -83,24 +128,19 @@ class RecycleDetect(Node):
             cv2.destroyAllWindows()
             rclpy.shutdown()
 
-    def _process(self, frame):
+    def _process(self, frame, frame_idx: int):
         roi = make_roi(frame, ROI.x1_ratio, ROI.y1_ratio, ROI.x2_ratio, ROI.y2_ratio)
         x1r, y1r, x2r, y2r = roi
         color_roi = crop_roi(frame, roi)
 
-        # numpy 배열 직접 추론
-        results = self.model(color_roi, size=416)
-        predictions = results.pred[0]
-
-        candidates = []
-        if predictions is not None and len(predictions) > 0:
-            for pred in predictions:
-                bx1, by1, bx2, by2, conf, cls = pred.tolist()
-                candidates.append({
-                    "bbox": [int(bx1), int(by1), int(bx2), int(by2)],
-                    "conf": float(conf),
-                    "cls":  int(cls),
-                })
+        # ROI를 임시 파일로 저장 후 추론 (grasp_detection_node 방식)
+        roi_path = os.path.join(self._tmp_dir, f"roi_{frame_idx:06d}.jpg")
+        cv2.imwrite(roi_path, color_roi)
+        candidates = detect_yolo_boxes_from_path(
+            model=self.model,
+            image_path=roi_path,
+            imgsz=YOLO_SEG.imgsz,
+        )
 
         vis = frame.copy()
         cv2.rectangle(vis, (x1r, y1r), (x2r, y2r), (100, 100, 100), 2)
