@@ -22,7 +22,6 @@ class GeminiReasonerNode(Node):
             decision = self.assistant.ask(
                 image_path=payload['image_path'],
                 audio_path=payload.get('audio_path'),
-                question=payload.get('question'),
                 vision_hint=payload.get('vision_hint'),
             )
             out = {
