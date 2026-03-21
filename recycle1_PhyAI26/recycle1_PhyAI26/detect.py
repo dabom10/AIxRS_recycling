@@ -9,7 +9,7 @@ import yolov5
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 
 # test_image_runner 경로 추가
 _CV_DIR = os.path.abspath(
@@ -49,11 +49,12 @@ class RecycleDetect(Node):
             raise RuntimeError("웹캠 오류")
 
         # 퍼블리셔
-        self.result_pub = self.create_publisher(String, "/recycle/grasp_result", 10)
+        self.result_pub = self.create_publisher(Bool,   "/recycle1/grasp_result", 10)
+        self.class_pub  = self.create_publisher(String, "/recycle1/class_name", 10)
 
         # 타이머 (30fps)
         self.timer = self.create_timer(1.0 / 30.0, self.timer_callback)
-        self.get_logger().info("RecycleDetect 시작 | 토픽: /recycle/grasp_result")
+        self.get_logger().info("RecycleDetect 시작 | 토픽: /recycle1/class_name")
 
     def timer_callback(self):
         ret, frame = self.cap.read()
@@ -63,10 +64,16 @@ class RecycleDetect(Node):
 
         result, vis = self._process(frame)
 
-        # 퍼블리시
-        msg = String()
-        msg.data = json.dumps(result, ensure_ascii=False)
+        # 감지 성공 여부 퍼블리시
+        msg = Bool()
+        msg.data = bool(result.get("ok", False))
         self.result_pub.publish(msg)
+
+        # 객체명만 퍼블리시
+        class_msg = String()
+        class_msg.data = result.get("class", "")
+        if class_msg.data:
+            self.class_pub.publish(class_msg)
 
         # 화면 출력
         cv2.imshow("RecycleDetect", vis)
