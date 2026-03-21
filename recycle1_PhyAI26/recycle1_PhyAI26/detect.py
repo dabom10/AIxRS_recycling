@@ -25,6 +25,13 @@ _MODEL_DIR = os.path.abspath(os.path.join(_GRASP_DIR, "../../models"))
 # ── grasp_detection_node import 준비 ─────────────────────────────────────────
 # config를 직접 로드 후 AIxRS_recycling... 경로로 sys.modules에 등록
 sys.path.insert(0, _GRASP_DIR)
+
+# cv_bridge는 NumPy 1.x 기준 컴파일 → NumPy 2.x에서 _ARRAY_API 오류 발생
+# detect.py는 cv_bridge를 직접 사용하지 않으므로 mock으로 우회
+from unittest.mock import MagicMock
+for _cv_mod in ['cv_bridge', 'cv_bridge.boost', 'cv_bridge.boost.cv_bridge_boost']:
+    sys.modules.setdefault(_cv_mod, MagicMock())
+
 import config as _gd_config
 
 for _mod_name in [
