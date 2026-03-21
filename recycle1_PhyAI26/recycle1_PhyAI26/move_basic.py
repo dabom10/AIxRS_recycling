@@ -56,16 +56,15 @@ class MoveNode(Node):
         self._pos_pub  = self.create_publisher(Int32, GRIPPER_POS_TOPIC, 10)
 
         # done 퍼블리셔
-        self._done_pub = self.create_publisher(Bool, "/recycle1/done", 10)
+        self._done_pub = self.create_publisher(Bool, "/reccycle1/done", 10)
 
         # 객체인식 구독
-        self._grasp_result = self._class_name = self._center_x = self._center_y = self._depth = None
+        self._class_name = self._center_x = self._center_y = self._depth = None
 
-        self.create_subscription(Bool,    "/recycle1/grasp_result", lambda m: setattr(self, "_grasp_result", m.data), 10)
-        self.create_subscription(String,  "/recycle1/class_name",   lambda m: setattr(self, "_class_name",   m.data), 10)
-        self.create_subscription(Float32, "/recycle1/center_x",     lambda m: setattr(self, "_center_x",     m.data), 10)
-        self.create_subscription(Float32, "/recycle1/center_y",     lambda m: setattr(self, "_center_y",     m.data), 10)
-        self.create_subscription(Float32, "/recycle1/depth",        self._cb_depth, 10)
+        self.create_subscription(String,  "/recycle1/class_name", lambda m: setattr(self, "_class_name", m.data), 10)
+        self.create_subscription(Float32, "/recycle1/center_x",   lambda m: setattr(self, "_center_x",   m.data), 10)
+        self.create_subscription(Float32, "/recycle1/center_y",   lambda m: setattr(self, "_center_y",   m.data), 10)
+        self.create_subscription(Float32, "/recycle1/depth",      self._cb_depth, 10)
 
     # ── 구독 콜백 ─────────────────────────────────────────
     def _cb_depth(self, msg):

@@ -1,0 +1,38 @@
+[
+  {
+    "idx": 0,
+    "bbox_xyxy": [
+      257,
+      170,
+      310,
+      223
+    ],
+    "conf": 0.91,
+    "cls_id": 3,
+    "class_name": "plastic",
+    "area": 2809,
+    "center": [
+      283.5,
+      196.5
+    ],
+    "dist2": 120.3
+  },
+  {
+    "idx": 1,
+    "bbox_xyxy": [
+      180,
+      140,
+      230,
+      205
+    ],
+    "conf": 0.62,
+    "cls_id": 2,
+    "class_name": "paper",
+    "area": 3250,
+    "center": [
+      205.0,
+      172.5
+    ],
+    "dist2": 640.8
+  }
+]
