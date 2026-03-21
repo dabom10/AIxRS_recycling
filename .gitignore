@@ -24,8 +24,8 @@ __pycache__/
 Thumbs.db
 
 # ===== ROS2 Package Setup =====
-setup.cfg
-setup.py
+# setup.cfg
+# setup.py
 
 #==== all test image ======
 *.png
